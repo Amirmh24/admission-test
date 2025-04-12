@@ -1,0 +1,457 @@
+---
+title: "پروژه ی تحلیل رگرسیون"
+author: "امیرمحمد محمدقلیها 96100277"
+font: 'BNazanin'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+lang: ar
+dir: rtl
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(ROCR)
+library(ISLR)
+library(glmnet)
+library(leaps)
+library(gam)
+library(class)
+library(MASS)
+library(boot)
+library(car)
+library(stringr)
+library(GGally)
+library(insight)
+set.seed(100)
+admission= read_csv("D:/Works/Regression Analysis/Exercises/Project/admission predict.csv")
+```
+
+
+#Classification
+
+توضیحات مختصر مربوط به هر ستون داده به صورت زیر است:
+
+GRE Scores ( out of 340 )
+
+نمره ی آزمون GRE
+
+TOEFL Scores ( out of 120 )
+
+نمره ی آزمون Tofel
+
+University Rating ( out of 5 )
+
+رتبه یا rate دانشگاه
+
+Statement of Purpose Strength (SOR) ( out of 5 )
+
+قوی بودن انگیزه ی فرد
+
+Letter of Recommendation Strength (LOR) ( out of 5 )
+
+قوی بودن recommendation های فرد
+
+Undergraduate GPA (CGPA) ( out of 10 )
+
+معدل کارشناسی
+
+Research Experience ( either 0 or 1 )
+
+تجربه ی تحقیق و research
+
+Chance of Admit ( ranging from 0 to 1 )
+
+شانس پذیرفته شدن
+
+Admit (either 0 or 1)
+
+پذیرفته شدن یا نشدن (که جلوتر آن را میسازیم).
+
+حدود داده ها به صورت زیر است:
+
+```{r}
+summary(admission)
+```
+
+
+##Task
+
+در اینجا قصد داریم پذیرفته شدن یا نشدن فرد را با استفاده از اطلاعات تحصیلی او پیش بینی کنیم. این کار به برنامه ریزی فرد بسیار میتواند کمک کننده باشد تا بداند در چه بخش های سرمایه گذاری بیشتری انجام دهد تا در آزمون پذیرفته شود.
+
+متغیر هدف: Admit
+
+ابتدا نمودار جعبه ای داده ها رسم میکنیم تا پراکندگی داده ها را بررسی کنیم.
+
+```{r}
+# before dropping the outliers
+ggplot(stack(admission[,2:3]),aes(x=ind,y=values))+geom_boxplot()
+ggplot(stack(admission[,4:9]),aes(x=ind,y=values))+geom_boxplot()
+```
+
+در ابتدا ستون اول که مربوط به شماره ی سریال است را حذف میکنیم زیرا اطلاعاتی از آن نمیتوان بدست آورد. سپس با استفاده از z-score داده های پرت را تبدیل به NA کرده تا هنگام حذف NA های داده، تمام داده های پرت حذف گردند.
+
+```{r}
+
+# omit the first column (Serial No.) which has no information
+admission=admission[-which(colnames(admission)=="Serial No.") ]
+
+# remove outliers using z-score
+scaled=scale(admission, center = TRUE, scale = TRUE)
+scaled=as.data.frame(scaled)
+admission[abs(scaled)>3]=NA
+
+# remove NA from dataset
+admission=na.omit(admission)
+
+```
+
+اکنون باری دیگر به نمودار جعبه ای داده ها پس از حذف داده های پرت نگاهی میندازیم.
+
+```{r}
+# after dropping the outliers
+ggplot(stack(admission[,1:2]),aes(x=ind,y=values))+geom_boxplot()
+ggplot(stack(admission[,3:8]),aes(x=ind,y=values))+geom_boxplot()
+```
+
+اکنون برای آنکه متغیر هدف یک کتغیر کیفی باشد، با در نظر گرفتن treshold برابر با 0.75 برای متغیر Chance of Admit یک متغیر dummy به نام Admit تعریف کرده ایم تا احتمال های بیشتر از حد تعیین شده را 1 و احتمال های کمتر از حد تعیین شده را 0 در نظر بگیریم.
+
+```{r}
+
+admission$Research=as.factor(admission$Research)
+
+admission[admission$`Chance of Admit` >=0.75,"Admit"]=1
+admission[admission$`Chance of Admit` <0.75,"Admit"]=0
+admission$Admit=as.factor(admission$Admit)
+
+#drop the (Chance of Admit) probability column
+admission=admission[-which(colnames(admission)=="Chance of Admit") ]
+```
+
+```{r}
+summary(admission)
+```
+
+اکنون مشتاق هستیم تا میزان همبستگی بین متغیر ها را با بهره گیری از نمودار و شکل بررسی کنیم.
+
+```{r}
+ggcorr(admission, palette = "PRGn", name="cor",label=TRUE,nbreaks = 8)
+```
+
+میبینیم که همبستگی زیادی بین ستون ها هست و احتمالا افرادی که در تحصیلات خود موفق بوده اند، قوی بودنشان در تمام زمینه های تحصیلی به چشم میخورد.
+
+یکی از راه های از بین بردن این همیستگی استفاده از PCA است.
+
+```{r}
+pca=prcomp(admission[,1:6],scale = TRUE)
+summary(pca)
+```
+
+میبینیم که واریانس نسبی تجمعی تا متغیر 4 ام حدود 95٪ است پس توقع داریم که بتوانیم مدل ها را با چهار متغیر توضیح دهنده برازش دهیم.
+
+```{r}
+loadings=as.data.frame(pca$x) 
+ggcorr(loadings, palette = "PRGn", name="cor",label=TRUE,nbreaks = 8)
+admission=cbind(loadings,admission[,7:8])
+```
+
+
+حال شش ستون جدید یعنی PC1 تا PC6 و Admit و Research را به یکدیگر میچسبانیم تا dataframe جدید تولید شود و اکنون با این داده ها کار میکنیم.
+
+```{r}
+pca=prcomp(admission[,1:6],scale = TRUE)
+summary(pca)
+```
+
+
+##مدل GLM
+
+```{r}
+
+glmModel=glm(Admit~.,data=admission,family = binomial)
+#summary(model)
+glmProb=predict(glmModel,type = "response")
+glmPred=c()
+Admit=admission$Admit
+glmPred[glmProb>=0.75]=1
+glmPred[glmProb<0.75]=0
+
+tableA=table(glmPred,Admit )
+tableA
+
+accuracy=mean(glmPred==Admit)
+accuracy
+
+truePositive=tableA[2,2]
+truePositive
+falsePositive=tableA[2,1]
+falsePositive
+trueNegative=tableA[1,1]
+trueNegative
+falseNegative=tableA[1,2]
+falseNegative
+
+```
+
+در اینجا هردو خطا اهمیت دارند ولی خطای falseNegative ممکن است زیان بیشتری برساند یعنی به اشتباه پیش بینی کنیم که فرد در آزمون مردود خواهد شد. در این حالت ممکن است فرد نا امید شود و در پذیرش شرکت نکند. که با این استدلال ما در پی آن خواهیم بود که مقدار recall را افزایش دهیم. زیرا recall طبق فرمول زیر falseNegative را به صورت نسبی میسنجد. گرچه ممکن است برای برخی نیز falsePositive زیان آور تر به نظر آید که در این حالت شاخص precision را باید افزایش دهیم.
+
+$$precision=\frac{true Positive}{true positive + false positive}$$ 
+
+$$recall=\frac{true Positive}{true positive + false negative}$$
+```{r}
+precision=truePositive/(truePositive+falsePositive)
+precision
+recall=truePositive/(truePositive+falseNegative)
+recall
+```
+
+```{r}
+
+indexes=sample(nrow(admission) ,replace = FALSE)
+foldsIndexes = cut(indexes , breaks=10 , labels=FALSE)
+indexesOfTest = which(foldsIndexes==1 , arr.ind=TRUE)
+trainData=admission[-indexesOfTest,]
+testData=admission[indexesOfTest,]
+
+model=glm(Admit~.,data=trainData,family=binomial) 
+glmProb=predict(glmModel,testData,type = "response")
+pred = prediction(glmProb, testData$Admit) 
+perf = performance(pred,"tpr","fpr")
+plot(perf,colorize=TRUE,main="Admit")
+
+```
+
+##مدل KNN
+
+از آنجایی که روش KNN وابسته به فاصله است و تاثیر هر متغیر پیشگو در فاصله وابسته به scale آن متغیر است، روش KNN ممکن است اثر نامطلوبی در این دیتاست داشته باشد. زیرا طبق توضیحات ابتدای این بخش بازه ی GRE تا 340 و بازه ی نمره ی TOFEL تا 120 است و مقیاس بقیه ی متغیر ها نسبت به این دو متغیر کوچکتر است. زمانی که scale یک متغیر بزرگ باشد در واقع انگار اثر بیشتری در مدل داشته است در صورتی که ممکن است تاثیر آن در دنیای واقع به آن اندازه نباشد. همچنین زمانی که scale یک متغیر کوچک باشد در واقع انگار اثر کمتری در مدل داشته است در صورتی که ممکن است تاثیر آن در دنیای واقع به آن اندازه نباشد. بنابراین از آنجا که ما نمیدانیم اثر کدام متغیر های بیشتر و کدام کمتر است scale ها را تغییر نمیدهیم گرچه با آزمون و خطا و کم و زیاد کردن مقیاس متغیر های پیشگو میتوان دقت مدل را بهبود بخشید.
+
+```{r}
+set.seed(100)
+#we choose 80% of data as train and the rest as test
+nrowTrainData=nrow(admission)*80/100
+nrowTestData=nrow(admission)-nrowTrainData
+
+indexOfDataTrain=sample(1:nrow(admission),nrowTrainData)
+
+trainData=admission[indexOfDataTrain,]
+testData=admission[-indexOfDataTrain,]
+
+accuracy=c()
+for (i in 1:20) {
+knnModel=knn(train = trainData,test = testData,trainData$Admit,k=i)
+accuracy[i]=(sum(testData$Admit==knnModel)/nrowTestData)
+}
+#vector of accuracy in term of each k
+accuracy
+#maximum accuracy
+max(accuracy)
+#maximum accuracy occures with following k
+match(max(accuracy),accuracy)
+```
+
+همانطور که میبینیم به ازای k=1 مقدار accuracy بیشینه شده است. اما accuracy تنها ملاک نیست و گاهی precision و recall نیز برای بهبود مدل کارآمد تر اند. شاخص accuracy زمانی مناسب است که تقارنی در جدول وجود داشته باشد. یعنی falsePositive و falseNegative تقریبا مقدار مشابهی داشته باشند. ابتدا برای مدل k=1 مقادیر زیر را محاسبه میکنیم:
+
+```{r}
+set.seed(100)
+bestknn=knn(train = trainData,test = testData,trainData$Admit,k=1)
+Admit=testData$Admit
+tableA=table(bestknn,Admit)
+tableA
+
+truePositive=sum(testData$Admit==1 & testData$Admit==bestknn)
+truePositive
+falsePositive=sum(testData$Admit==0 & testData$Admit!=bestknn)
+falsePositive
+trueNegative=sum(testData$Admit==0 & testData$Admit==bestknn)
+trueNegative
+falseNegative=sum(testData$Admit==1 & testData$Admit!=bestknn)
+falseNegative
+
+precision=truePositive/(truePositive+falsePositive)
+precision
+recall=truePositive/(truePositive+falseNegative)
+recall
+accuracy=sum(testData$Admit==bestknn)/nrowTestData
+accuracy
+```
+
+میبینیم که مقدار recall و precision هردو بهبود یافتند. پس مدل KNN مناسب تر از مدل Logistic است.
+
+```{r}
+indexes=sample(nrow(admission) ,replace = FALSE)
+foldsIndexes = cut(indexes , breaks=10 , labels=FALSE)
+indexesOfTest = which(foldsIndexes==1 , arr.ind=TRUE)
+trainData=admission[-indexesOfTest,]
+testData=admission[indexesOfTest,]
+
+str=paste0("class",i)
+trainResponse=admission$Admit[-indexesOfTest]
+testResponse=admission$Admit[indexesOfTest]
+cl = trainResponse[,drop=TRUE]
+model= knn(trainData, testData, cl, k=10, prob=TRUE)
+prob = attr(model, "prob")
+pred = prediction(prob, testResponse) 
+perf = performance(pred,"tpr","fpr")
+par(pty="s")
+plot(perf,colorize=TRUE,main="Admit")
+
+```
+
+##مدل LDA
+
+حال یک مدل lda به داده ها برازش میدهیم.
+
+```{r}
+
+ldaModel=lda(Admit~.,data=admission,subset=indexOfDataTrain)
+ldaModel
+```
+
+برای آزمودن این مدل از Cross Valodation k-fold استفاده میکنیم که تابع آن به صورت زیر تعریف میشود.
+
+```{r}
+ldaCrossValidation=function(df,ldaModel,k){
+  set.seed(100)
+  indexes=sample(nrow(df) ,replace = FALSE)
+  foldsIndexes = cut(indexes , breaks=k , labels=FALSE)
+  accuracy=c()
+  myFormula=formula(paste(format(terms(ldaModel)),collapse = ""))
+  
+  myResponse=(as.character(attr(terms(myFormula),"variables"))[-1])[attr(terms(myFormula),"response")]
+  myResponse=str_replace_all(myResponse ,"`","")
+  for (i in 1:k) {
+   indexesOfTest = which(foldsIndexes==i , arr.ind=TRUE)
+   trainData=df[-indexesOfTest,]
+   testData=df[indexesOfTest,]
+   myModel=lda(formula = myFormula ,data = trainData )
+   myPred=predict(ldaModel,testData)
+    accuracy[i]=sum(myPred$class==testData$Admit)/dim(testData)[1]
+  }
+  output=mean(accuracy)
+  return(output)
+}
+```
+
+
+```{r}
+ldaCrossValidation(admission,ldaModel,5)
+ldaPred=predict(ldaModel,admission)
+Admit=admission$Admit
+ldaPreds=ldaPred$class
+tableA=table(ldaPreds,Admit)
+tableA
+
+truePositive=sum(admission$Admit==1 & admission$Admit==ldaPred$class)
+truePositive
+falsePositive=sum(admission$Admit==0 & admission$Admit!=ldaPred$class)
+falsePositive
+trueNegative=sum(admission$Admit==0 & admission$Admit==ldaPred$class)
+trueNegative
+falseNegative=sum(admission$Admit==1 & admission$Admit!=ldaPred$class)
+falseNegative
+
+precision=truePositive/(truePositive+falsePositive)
+precision
+recall=truePositive/(truePositive+falseNegative)
+recall
+```
+
+اکنون ROC را برای lda رسم میکنیم.
+
+```{r}
+
+indexes=sample(nrow(admission) ,replace = FALSE)
+foldsIndexes = cut(indexes , breaks=10 , labels=FALSE)
+indexesOfTest = which(foldsIndexes==1 , arr.ind=TRUE)
+trainData=admission[-indexesOfTest,]
+testData=admission[indexesOfTest,]
+
+model=lda(Admit~.,data=trainData) 
+qdaPred=predict(model,testData,type = "response") 
+pred = prediction(qdaPred$posterior[,2], testData$Admit) 
+perf = performance(pred,"tpr","fpr")
+plot(perf,colorize=TRUE,main="Admit")
+
+```
+
+##مدل QDA
+
+```{r}
+
+qdaModel=qda(Admit~.,data=admission,subset=indexOfDataTrain)
+qdaModel
+
+```
+
+```{r}
+qdaCrossValidation=function(df,qdaModel,k){
+  set.seed(100)
+  indexes=sample(nrow(df) ,replace = FALSE)
+  foldsIndexes = cut(indexes , breaks=k , labels=FALSE)
+  v=c()
+  myFormula=formula(paste(format(terms(qdaModel)),collapse = ""))
+  
+  myResponse=(as.character(attr(terms(myFormula),"variables"))[-1])[attr(terms(myFormula),"response")]
+  myResponse=str_replace_all(myResponse ,"`","")
+  for (i in 1:k) {
+   indexesOfTest = which(foldsIndexes==i , arr.ind=TRUE)
+   trainData=df[-indexesOfTest,]
+   testData=df[indexesOfTest,]
+   myModel=qda(formula = myFormula ,data = trainData)
+   myPred=predict(ldaModel,testData)
+   
+    v[i]=sum(myPred$class==testData$Admit)/dim(testData)[1]
+  }
+  output=mean(v)
+  return(output)
+}
+```
+
+```{r}
+qdaCrossValidation(admission,qdaModel,5)
+qdaPred=predict(qdaModel,admission)
+Admit=admission$Admit
+qdaPreds=qdaPred$class
+tableA=table(qdaPreds,Admit)
+tableA
+
+truePositive=sum(admission$Admit==1 & admission$Admit==qdaPred$class)
+truePositive
+falsePositive=sum(admission$Admit==0 & admission$Admit!=qdaPred$class)
+falsePositive
+trueNegative=sum(admission$Admit==0 & admission$Admit==qdaPred$class)
+trueNegative
+falseNegative=sum(admission$Admit==1 & admission$Admit!=qdaPred$class)
+falseNegative
+
+precision=truePositive/(truePositive+falsePositive)
+precision
+recall=truePositive/(truePositive+falseNegative)
+recall
+```
+
+
+اکنون ROC را برای qda رسم میکنیم.
+
+```{r}
+
+indexes=sample(nrow(admission) ,replace = FALSE)
+foldsIndexes = cut(indexes , breaks=10 , labels=FALSE)
+indexesOfTest = which(foldsIndexes==1 , arr.ind=TRUE)
+trainData=admission[-indexesOfTest,]
+testData=admission[indexesOfTest,]
+
+model=qda(Admit~.,data=trainData) 
+qdaPred=predict(model,testData,type = "response") 
+pred = prediction(qdaPred$posterior[,2], testData$Admit) 
+perf = performance(pred,"tpr","fpr")
+plot(perf,colorize=TRUE,main="Admit")
+
+  
+```
+
+اکنون با دیدن نمودار های ROC و مقایسه ی recall، precision و accuracy مدل های مختلف میتوانیم بگوییم که مدل KNN با k=1 بهترین عملکرد را داشته.
